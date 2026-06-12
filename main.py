@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
 import logging
+import os
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,9 +18,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Render Environment Variable'dan alınır
+# Render Dashboard → Environment → API_SECRET_KEY = istediğin şifre
+API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
+
 
 class Mp3Request(BaseModel):
     url: str
+
+
+def check_api_key(x_api_key: Optional[str]):
+    """API key kontrolü - eğer .env'de set edildiyse kontrol eder"""
+    if API_SECRET_KEY and x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Yetkisiz erişim")
 
 
 @app.get("/")
@@ -27,11 +39,16 @@ def root():
 
 
 @app.post("/api/mp3")
-def get_mp3_url(request: Mp3Request):
+def get_mp3_url(
+    request: Mp3Request,
+    x_api_key: Optional[str] = Header(default=None)
+):
     """
-    YouTube URL'sini alır, direkt stream edilebilir MP3 URL döndürür.
+    YouTube URL'sini alır, direkt stream edilebilir audio URL döndürür.
     Android uygulaması bu URL'yi ExoPlayer ile çalar veya indirir.
     """
+    check_api_key(x_api_key)
+
     url = request.url.strip()
 
     if not url:
@@ -47,9 +64,7 @@ def get_mp3_url(request: Mp3Request):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        # URL'yi direkt çekiyoruz, dosya indirmiyoruz
         "skip_download": True,
-        # Android ExoPlayer uyumlu header
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
         },
@@ -62,30 +77,26 @@ def get_mp3_url(request: Mp3Request):
             if not info:
                 raise HTTPException(status_code=404, detail="Video bulunamadı")
 
-            # En iyi audio URL'sini bul
             audio_url = None
             duration = info.get("duration", 0)
             title = info.get("title", "Bilinmeyen")
             thumbnail = info.get("thumbnail", "")
 
-            # Formats listesinden en iyi audio'yu seç
             formats = info.get("formats", [])
 
-            # Önce m4a veya webm audio ara
             for fmt in formats:
                 if fmt.get("acodec") != "none" and fmt.get("vcodec") == "none":
                     if fmt.get("url"):
                         audio_url = fmt["url"]
                         break
 
-            # Bulunamazsa genel url kullan
             if not audio_url:
                 audio_url = info.get("url")
 
             if not audio_url:
                 raise HTTPException(status_code=500, detail="Stream URL çıkarılamadı")
 
-            logger.info(f"Başarılı: {title} - URL uzunluğu: {len(audio_url)}")
+            logger.info(f"Başarılı: {title}")
 
             return {
                 "status": "success",
