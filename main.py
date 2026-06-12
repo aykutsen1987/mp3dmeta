@@ -4,7 +4,7 @@ from pydantic import BaseModel
 import yt_dlp
 import logging
 import os
-import tempfile
+import requests
 from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
@@ -21,67 +21,45 @@ app.add_middleware(
 
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
-@app.on_event("shutdown")
-def cleanup():
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        try:
-            os.unlink(COOKIES_FILE)
-            logger.info("🧹 Cookies temp dosyası temizlendi")
-        except Exception:
-            pass
-
 SUPPORTED_FORMATS = ["mp3", "m4a", "flac"]
 
-FORMAT_MAP = {
-    "mp3":  "bestaudio[ext=webm]/bestaudio/best",
-    "m4a":  "bestaudio[ext=m4a]/bestaudio/best",
-    "flac": "bestaudio/best",
+COBALT_API_URL = os.environ.get("COBALT_API_URL", "http://localhost:9000")
+
+COBALT_AUDIO_FORMAT_MAP = {
+    "mp3": "mp3",
+    "m4a": "best",
+    "flac": "best",
 }
 
-COOKIES_FILE = None
-cookies_env = os.environ.get("YOUTUBE_COOKIES", "")
-if cookies_env:
-    try:
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-        tmp.write(cookies_env)
-        tmp.close()
-        COOKIES_FILE = tmp.name
-        logger.info("✅ YouTube cookies yüklendi")
-    except Exception as e:
-        logger.error(f"❌ Cookies yüklenemedi: {e}")
-
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Connection": "keep-alive",
-}
-
-def get_ydl_opts(base_opts: dict) -> dict:
-    opts = {
-        **base_opts,
-        "http_headers": BROWSER_HEADERS,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-                "skip": ["dash", "hls", "translated_subs"],
-            }
-        },
-        "youtube_include_dash_manifest": False,
-        "youtube_include_hls_manifest": False,
+def call_cobalt(url: str, audio_format: str) -> dict:
+    cobalt_format = COBALT_AUDIO_FORMAT_MAP.get(audio_format, "mp3")
+    payload = {
+        "url": url,
+        "audioFormat": cobalt_format,
+        "audioBitrate": "320",
+        "downloadMode": "audio",
+        "youtubeHLS": True,
     }
-    if COOKIES_FILE:
-        opts["cookiefile"] = COOKIES_FILE
-    return opts
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    logger.info(f"☕ Cobalt'a yönlendiriliyor: {url} [{audio_format}]")
+    resp = requests.post(f"{COBALT_API_URL}/", json=payload, headers=headers, timeout=120)
+    if resp.status_code != 200:
+        logger.error(f"❌ Cobalt hatası {resp.status_code}: {resp.text[:200]}")
+        raise HTTPException(status_code=502, detail=f"Cobalt hatası: {resp.text[:200]}")
+    data = resp.json()
+    if data.get("status") in ("tunnel", "redirect") and data.get("url"):
+        return {
+            "status": "success",
+            "mp3_url": data["url"],
+            "title": data.get("filename", ""),
+            "duration": 0,
+        }
+    error_msg = data.get("error", {}).get("message", "Cobalt işleme hatası")
+    logger.error(f"❌ Cobalt: {error_msg}")
+    raise HTTPException(status_code=500, detail=error_msg)
 
 
 class Mp3Request(BaseModel):
@@ -121,13 +99,16 @@ def search_music(
 
     logger.info(f"Arama: {query}")
 
-    ydl_opts = get_ydl_opts({
+    ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
         "skip_download": True,
         "noplaylist": False,
-    })
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
+        },
+    }
 
     try:
         search_url = f"ytsearch{request.limit}:{query} music"
@@ -205,82 +186,10 @@ def get_audio_url(
 
     logger.info(f"Stream isteği [{fmt}]: {url}")
 
-    ydl_opts = get_ydl_opts({
-        "format": FORMAT_MAP[fmt],
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-    })
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-            if not info:
-                raise HTTPException(status_code=404, detail="Video bulunamadı")
-
-            audio_url = None
-            duration = info.get("duration", 0)
-            title = info.get("title", "Bilinmeyen")
-            thumbnail = info.get("thumbnail", "")
-            actual_ext = info.get("ext", fmt)  # gerçek uzantı
-
-            # İstenen formata göre en iyi stream'i seç
-            formats = info.get("formats", [])
-
-            if fmt == "m4a":
-                for f in formats:
-                    if f.get("ext") == "m4a" and f.get("acodec") != "none" and f.get("vcodec") == "none":
-                        audio_url = f.get("url")
-                        actual_ext = "m4a"
-                        break
-            elif fmt == "flac":
-                # FLAC direkt stream genelde yoktur; en yüksek kaliteli audio alınır
-                for f in sorted(formats, key=lambda x: x.get("abr") or 0, reverse=True):
-                    if f.get("acodec") != "none" and f.get("vcodec") == "none":
-                        audio_url = f.get("url")
-                        actual_ext = f.get("ext", "webm")
-                        break
-            else:  # mp3
-                for f in formats:
-                    if f.get("acodec") != "none" and f.get("vcodec") == "none":
-                        audio_url = f.get("url")
-                        actual_ext = f.get("ext", "webm")
-                        break
-
-            # Fallback
-            if not audio_url:
-                audio_url = info.get("url")
-                actual_ext = info.get("ext", fmt)
-
-            if not audio_url:
-                raise HTTPException(status_code=500, detail="Stream URL çıkarılamadı")
-
-            logger.info(f"Başarılı [{fmt}/{actual_ext}]: {title}")
-
-            return {
-                "status": "success",
-                "title": title,
-                "duration": duration,
-                "thumbnail": thumbnail,
-                "requested_format": fmt,
-                "actual_format": actual_ext,
-                "mp3_url": audio_url,   # alan adı aynı kaldı (geriye dönük uyumluluk)
-            }
-
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        logger.error(f"yt-dlp hatası: {error_msg}")
-        if "Private video" in error_msg:
-            raise HTTPException(status_code=403, detail="Bu video özel")
-        elif "not available" in error_msg:
-            raise HTTPException(status_code=404, detail="Video mevcut değil")
-        elif "copyright" in error_msg.lower():
-            raise HTTPException(status_code=403, detail="Telif hakkı kısıtlaması")
-        else:
-            raise HTTPException(status_code=500, detail=f"Video işlenemedi: {error_msg[:200]}")
-
+        return call_cobalt(url, fmt)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Beklenmeyen hata: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Sunucu hatası: {str(e)[:200]}")
+        logger.error(f"❌ Stream hatası: {e}")
+        raise HTTPException(status_code=500, detail=f"İşleme hatası: {str(e)[:200]}")

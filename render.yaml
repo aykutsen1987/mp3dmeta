@@ -2,9 +2,23 @@ services:
   - type: web
     name: mp3-stream-api
     runtime: python
-    buildCommand: "pip install --upgrade pip && pip install fastapi uvicorn yt-dlp pydantic && pip install --upgrade yt-dlp"
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     plan: free
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.6
+      - key: COBALT_API_URL
+        value: https://cobalt-mp3dmeta.onrender.com
+
+  - type: web
+    name: cobalt-mp3dmeta
+    runtime: image
+    image:
+      url: ghcr.io/imputnet/cobalt:latest
+    plan: free
+    envVars:
+      - key: API_URL
+        value: https://cobalt-mp3dmeta.onrender.com
+      - key: CORS_WILDCARD
+        value: "true"
