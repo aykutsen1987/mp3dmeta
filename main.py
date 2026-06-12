@@ -3,8 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import os
-import re
-import json
 import requests
 from typing import Optional
 from urllib.parse import quote
@@ -33,95 +31,54 @@ COBALT_AUDIO_FORMAT_MAP = {
     "flac": "best",
 }
 
-YOUTUBE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-}
+INVIDIOUS_INSTANCE = os.environ.get("INVIDIOUS_INSTANCE", "https://inv.nadeko.net")
 
 
 def search_youtube(query: str, limit: int = 20) -> list:
-    logger.info(f"🔍 YouTube HTML scraping: {query}")
-    url = f"https://www.youtube.com/results?search_query={quote(query)}"
-    resp = requests.get(url, headers=YOUTUBE_HEADERS, timeout=30)
-    resp.raise_for_status()
-
-    m = re.search(r"var ytInitialData\s*=\s*({.*?});</script>", resp.text, re.DOTALL)
-    if not m:
-        logger.error("❌ ytInitialData bulunamadı")
+    logger.info(f"🔍 Invidious arama: {query}")
+    url = f"{INVIDIOUS_INSTANCE}/api/v1/search?q={quote(query)}&type=video"
+    resp = requests.get(url, timeout=30)
+    if resp.status_code != 200:
+        logger.error(f"❌ Invidious hatası {resp.status_code}: {resp.text[:200]}")
         return []
 
-    data = json.loads(m.group(1))
-
+    items = resp.json()
     results = []
-    contents = (
-        data.get("contents", {})
-        .get("twoColumnSearchResultsRenderer", {})
-        .get("primaryContents", {})
-        .get("sectionListRenderer", {})
-        .get("contents", [])
-    )
+    for item in items:
+        if item.get("type") != "video":
+            continue
+        video_id = item.get("videoId", "")
+        if not video_id:
+            continue
 
-    for section in contents:
-        items = section.get("itemSectionRenderer", {}).get("contents", [])
-        for item in items:
-            video = item.get("videoRenderer")
-            if not video:
-                continue
+        title = item.get("title", "Bilinmeyen")
+        channel = item.get("author", "")
+        duration_seconds = item.get("lengthSeconds", 0)
+        thumbnails = item.get("videoThumbnails", [])
+        thumbnail = thumbnails[-1].get("url", "") if thumbnails else ""
 
-            video_id = video.get("videoId", "")
-            if not video_id:
-                continue
+        if not thumbnail and video_id:
+            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
-            title_runs = video.get("title", {}).get("runs", [])
-            title = "".join(run.get("text", "") for run in title_runs)
+        if " - " in title:
+            parts = title.split(" - ", 1)
+            artist = parts[0].strip()
+            song_title = parts[1].strip()
+        else:
+            artist = channel
+            song_title = title
 
-            channel_runs = (
-                video.get("ownerText", {})
-                .get("runs", [])
-            )
-            channel = "".join(run.get("text", "") for run in channel_runs)
+        results.append({
+            "id": video_id,
+            "title": song_title,
+            "artist": artist,
+            "uploader": channel,
+            "duration": duration_seconds if isinstance(duration_seconds, (int, float)) else 0,
+            "coverUrl": thumbnail,
+            "audioUrl": f"https://www.youtube.com/watch?v={video_id}",
+            "isCopyrightFree": False,
+        })
 
-            thumbnails = video.get("thumbnail", {}).get("thumbnails", [])
-            thumbnail = thumbnails[-1].get("url", "") if thumbnails else ""
-
-            duration_text = (
-                video.get("lengthText", {}).get("simpleText", "")
-                or video.get("lengthText", {}).get("runs", [{}])[0].get("text", "")
-            )
-            duration_seconds = 0
-            if duration_text:
-                parts = duration_text.split(":")
-                if len(parts) == 2:
-                    duration_seconds = int(parts[0]) * 60 + int(parts[1])
-                elif len(parts) == 3:
-                    duration_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-
-            if not thumbnail and video_id:
-                thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-            if " - " in title:
-                title_parts = title.split(" - ", 1)
-                artist = title_parts[0].strip()
-                song_title = title_parts[1].strip()
-            else:
-                artist = channel
-                song_title = title
-
-            results.append({
-                "id": video_id,
-                "title": song_title,
-                "artist": artist,
-                "uploader": channel,
-                "duration": duration_seconds,
-                "coverUrl": thumbnail,
-                "audioUrl": f"https://www.youtube.com/watch?v={video_id}",
-                "isCopyrightFree": False,
-            })
-
-            if len(results) >= limit:
-                break
         if len(results) >= limit:
             break
 
