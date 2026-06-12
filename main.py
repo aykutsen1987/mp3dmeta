@@ -31,18 +31,34 @@ COBALT_AUDIO_FORMAT_MAP = {
     "flac": "best",
 }
 
-INVIDIOUS_INSTANCE = os.environ.get("INVIDIOUS_INSTANCE", "https://inv.nadeko.net")
+INVIDIOUS_INSTANCES = [
+    "https://yewtu.be",
+    "https://inv.nadeko.net",
+    "https://invidious.snopyta.org",
+    "https://inv.bp.projectsegfau.lt",
+    "https://invidious.privacydev.net",
+    "https://invidious.lunar.icu",
+]
 
 
 def search_youtube(query: str, limit: int = 20) -> list:
-    logger.info(f"🔍 Invidious arama: {query}")
-    url = f"{INVIDIOUS_INSTANCE}/api/v1/search?q={quote(query)}&type=video"
-    resp = requests.get(url, timeout=30)
-    if resp.status_code != 200:
-        logger.error(f"❌ Invidious hatası {resp.status_code}: {resp.text[:200]}")
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            logger.info(f"🔍 Invidious deneniyor: {instance}")
+            url = f"{instance}/api/v1/search?q={quote(query)}&type=video"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"✅ Invidious başarılı: {instance}")
+                items = resp.json()
+                break
+            else:
+                logger.warning(f"⚠️ {instance} yanıt {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ {instance} hata: {e}")
+    else:
+        logger.error("❌ Tüm Invidious instance'ları başarısız")
         return []
 
-    items = resp.json()
     results = []
     for item in items:
         if item.get("type") != "video":
