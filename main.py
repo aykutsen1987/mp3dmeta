@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import os
-import re
 import requests
 from typing import Optional
 from urllib.parse import quote
@@ -32,81 +31,51 @@ COBALT_AUDIO_FORMAT_MAP = {
     "flac": "best",
 }
 
-PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.syncpundit.io",
-    "https://pipedapi.nosebs.ru",
-    "https://pipedapi.r4fo.com",
-]
-
-
 def search_youtube(query: str, limit: int = 20) -> list:
-    for instance in PIPED_INSTANCES:
-        try:
-            logger.info(f"🔍 Piped deneniyor: {instance}")
-            url = f"{instance}/search?q={quote(query)}&filter=music"
-            resp = requests.get(url, timeout=15)
-            if resp.status_code != 200:
-                logger.warning(f"⚠️ {instance} yanıt {resp.status_code}")
-                continue
-            try:
-                data = resp.json()
-            except Exception:
-                logger.warning(f"⚠️ {instance} JSON hatası")
-                continue
-            items = data.get("items", [])
-            if not items:
-                logger.warning(f"⚠️ {instance} boş sonuç")
-                continue
-            logger.info(f"✅ Piped başarılı: {instance} ({len(items)} sonuç)")
-            break
-        except Exception as e:
-            logger.warning(f"⚠️ {instance} hata: {e}")
-            continue
-    else:
-        logger.error("❌ Tüm Piped instance'ları başarısız")
+    logger.info(f"🔍 iTunes Search: {query}")
+    url = f"https://itunes.apple.com/search?term={quote(query)}&limit={limit}&entity=musicVideo"
+    resp = requests.get(url, timeout=15)
+    if resp.status_code != 200:
+        logger.error(f"❌ iTunes hatası {resp.status_code}: {resp.text[:200]}")
         return []
+
+    data = resp.json()
+    items = data.get("results", [])
+    logger.info(f"✅ iTunes: {len(items)} sonuç")
 
     results = []
     for item in items:
-        video_id = ""
-        url_path = item.get("url", "")
-        if url_path:
-            m = re.search(r"v=([a-zA-Z0-9_-]{11})|/watch/([a-zA-Z0-9_-]{11})", url_path)
-            if m:
-                video_id = m.group(1) or m.group(2)
-        if not video_id:
-            continue
+        track_name = item.get("trackName", item.get("trackCensoredName", "Bilinmeyen"))
+        artist_name = item.get("artistName", "")
+        collection_name = item.get("collectionName", "")
 
-        title = item.get("title", "Bilinmeyen")
-        channel = item.get("uploaderName", item.get("uploader", ""))
-        duration_seconds = item.get("duration", 0)
-        thumbnail = item.get("thumbnailUrl", "")
-
-        if not thumbnail and video_id:
-            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-        if " - " in title:
-            parts = title.split(" - ", 1)
+        if " - " in track_name:
+            parts = track_name.split(" - ", 1)
             artist = parts[0].strip()
             song_title = parts[1].strip()
         else:
-            artist = channel
-            song_title = title
+            artist = artist_name
+            song_title = track_name
+
+        artwork = (
+            item.get("artworkUrl100", "")
+            .replace("100x100bb", "600x600bb")
+            .replace("100x100", "600x600")
+        )
+
+        preview_url = item.get("previewUrl", "")
+        track_url = item.get("trackViewUrl", "")
 
         results.append({
-            "id": video_id,
+            "id": f"it_{item.get('trackId', 0)}",
             "title": song_title,
             "artist": artist,
-            "uploader": channel,
-            "duration": duration_seconds if isinstance(duration_seconds, (int, float)) else 0,
-            "coverUrl": thumbnail,
-            "audioUrl": f"https://www.youtube.com/watch?v={video_id}",
-            "isCopyrightFree": False,
+            "uploader": artist_name,
+            "duration": item.get("trackTimeMillis", 0) // 1000,
+            "coverUrl": artwork,
+            "audioUrl": track_url if track_url else f"https://music.apple.com/search?term={quote(track_name + ' ' + artist_name)}",
+            "isCopyrightFree": True,
         })
-
-        if len(results) >= limit:
-            break
 
     return results
 
