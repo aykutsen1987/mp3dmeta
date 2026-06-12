@@ -106,8 +106,14 @@ def search_music(
         "skip_download": True,
         "noplaylist": False,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
         },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+            }
+        },
+        "youtube_include_dash_manifest": False,
     }
 
     try:
@@ -116,11 +122,18 @@ def search_music(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_url, download=False)
 
-            if not info or "entries" not in info:
+            if not info:
+                logger.warning("⚠️ yt-dlp boş yanıt döndü")
                 return {"status": "success", "results": []}
 
+            entries = info.get("entries") or info.get("items")
+            if not entries:
+                logger.warning(f"⚠️ yt-dlp yanıtında entry bulunamadı: {list(info.keys())}")
+                return {"status": "success", "results": []}
+
+            logger.info(f"✅ yt-dlp {len(entries)} sonuç döndü")
             results = []
-            for entry in info["entries"]:
+            for entry in entries:
                 if not entry:
                     continue
 
