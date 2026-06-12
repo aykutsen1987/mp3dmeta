@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import os
+import re
 import requests
 from typing import Optional
 from urllib.parse import quote
@@ -31,47 +32,56 @@ COBALT_AUDIO_FORMAT_MAP = {
     "flac": "best",
 }
 
-INVIDIOUS_INSTANCES = [
-    "https://yewtu.be",
-    "https://inv.nadeko.net",
-    "https://invidious.snopyta.org",
-    "https://inv.bp.projectsegfau.lt",
-    "https://invidious.privacydev.net",
-    "https://invidious.lunar.icu",
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.syncpundit.io",
+    "https://pipedapi.nosebs.ru",
+    "https://pipedapi.r4fo.com",
 ]
 
 
 def search_youtube(query: str, limit: int = 20) -> list:
-    for instance in INVIDIOUS_INSTANCES:
+    for instance in PIPED_INSTANCES:
         try:
-            logger.info(f"🔍 Invidious deneniyor: {instance}")
-            url = f"{instance}/api/v1/search?q={quote(query)}&type=video"
+            logger.info(f"🔍 Piped deneniyor: {instance}")
+            url = f"{instance}/search?q={quote(query)}&filter=music"
             resp = requests.get(url, timeout=15)
-            if resp.status_code == 200:
-                logger.info(f"✅ Invidious başarılı: {instance}")
-                items = resp.json()
-                break
-            else:
+            if resp.status_code != 200:
                 logger.warning(f"⚠️ {instance} yanıt {resp.status_code}")
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                logger.warning(f"⚠️ {instance} JSON hatası")
+                continue
+            items = data.get("items", [])
+            if not items:
+                logger.warning(f"⚠️ {instance} boş sonuç")
+                continue
+            logger.info(f"✅ Piped başarılı: {instance} ({len(items)} sonuç)")
+            break
         except Exception as e:
             logger.warning(f"⚠️ {instance} hata: {e}")
+            continue
     else:
-        logger.error("❌ Tüm Invidious instance'ları başarısız")
+        logger.error("❌ Tüm Piped instance'ları başarısız")
         return []
 
     results = []
     for item in items:
-        if item.get("type") != "video":
-            continue
-        video_id = item.get("videoId", "")
+        video_id = ""
+        url_path = item.get("url", "")
+        if url_path:
+            m = re.search(r"v=([a-zA-Z0-9_-]{11})|/watch/([a-zA-Z0-9_-]{11})", url_path)
+            if m:
+                video_id = m.group(1) or m.group(2)
         if not video_id:
             continue
 
         title = item.get("title", "Bilinmeyen")
-        channel = item.get("author", "")
-        duration_seconds = item.get("lengthSeconds", 0)
-        thumbnails = item.get("videoThumbnails", [])
-        thumbnail = thumbnails[-1].get("url", "") if thumbnails else ""
+        channel = item.get("uploaderName", item.get("uploader", ""))
+        duration_seconds = item.get("duration", 0)
+        thumbnail = item.get("thumbnailUrl", "")
 
         if not thumbnail and video_id:
             thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
