@@ -8,17 +8,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.6
-      - key: COBALT_API_URL
-        value: https://cobalt-mp3dmeta.onrender.com
-
-  - type: web
-    name: cobalt-mp3dmeta
-    runtime: image
-    image:
-      url: ghcr.io/imputnet/cobalt:latest
-    plan: free
-    envVars:
-      - key: API_URL
-        value: https://cobalt-mp3dmeta.onrender.com
-      - key: CORS_WILDCARD
-        value: "true"

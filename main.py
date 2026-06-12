@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import logging
 import os
 import requests
+import yt_dlp
 from typing import Optional
 from urllib.parse import quote
 
@@ -23,13 +24,14 @@ API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
 SUPPORTED_FORMATS = ["mp3", "m4a", "flac"]
 
-COBALT_API_URL = os.environ.get("COBALT_API_URL", "http://localhost:9000")
-
-COBALT_AUDIO_FORMAT_MAP = {
-    "mp3": "mp3",
-    "m4a": "best",
-    "flac": "best",
+YDL_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.5345.16 Mobile Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.youtube.com",
+    "Referer": "https://www.youtube.com",
 }
+
 
 def search_youtube(query: str, limit: int = 20) -> list:
     logger.info(f"🔍 iTunes Search: {query}")
@@ -47,7 +49,6 @@ def search_youtube(query: str, limit: int = 20) -> list:
     for item in items:
         track_name = item.get("trackName", item.get("trackCensoredName", "Bilinmeyen"))
         artist_name = item.get("artistName", "")
-        collection_name = item.get("collectionName", "")
 
         if " - " in track_name:
             parts = track_name.split(" - ", 1)
@@ -63,7 +64,6 @@ def search_youtube(query: str, limit: int = 20) -> list:
             .replace("100x100", "600x600")
         )
 
-        preview_url = item.get("previewUrl", "")
         track_url = item.get("trackViewUrl", "")
 
         results.append({
@@ -80,35 +80,94 @@ def search_youtube(query: str, limit: int = 20) -> list:
     return results
 
 
-def call_cobalt(url: str, audio_format: str) -> dict:
-    cobalt_format = COBALT_AUDIO_FORMAT_MAP.get(audio_format, "mp3")
-    payload = {
-        "url": url,
-        "audioFormat": cobalt_format,
-        "audioBitrate": "320",
-        "downloadMode": "audio",
-        "youtubeHLS": True,
+def extract_audio(url: str, audio_format: str) -> dict:
+    fmt = audio_format.lower().strip()
+    if fmt not in SUPPORTED_FORMATS:
+        fmt = "mp3"
+
+    FORMAT_MAP = {
+        "mp3": "bestaudio[ext=webm]/bestaudio/best",
+        "m4a": "bestaudio[ext=m4a]/bestaudio/best",
+        "flac": "bestaudio/best",
     }
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+
+    ydl_opts = {
+        "format": FORMAT_MAP[fmt],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "http_headers": YDL_HEADERS,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["dash", "hls", "translated_subs"],
+            }
+        },
+        "youtube_include_dash_manifest": False,
+        "youtube_include_hls_manifest": False,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
-    logger.info(f"☕ Cobalt'a yönlendiriliyor: {url} [{audio_format}]")
-    resp = requests.post(f"{COBALT_API_URL}/", json=payload, headers=headers, timeout=120)
-    if resp.status_code != 200:
-        logger.error(f"❌ Cobalt hatası {resp.status_code}: {resp.text[:200]}")
-        raise HTTPException(status_code=502, detail=f"Cobalt hatası: {resp.text[:200]}")
-    data = resp.json()
-    if data.get("status") in ("tunnel", "redirect") and data.get("url"):
+
+    try:
+        logger.info(f"🎵 Audio çıkarılıyor: {url} [{fmt}]")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not info:
+            raise HTTPException(status_code=404, detail="Video bulunamadı")
+
+        audio_url = None
+        duration = info.get("duration", 0)
+        title = info.get("title", "Bilinmeyen")
+        thumbnail = info.get("thumbnail", "")
+        actual_ext = info.get("ext", fmt)
+        formats = info.get("formats", [])
+
+        if fmt == "m4a":
+            for f in formats:
+                if f.get("ext") == "m4a" and f.get("acodec") != "none" and f.get("vcodec") == "none":
+                    audio_url = f.get("url")
+                    actual_ext = "m4a"
+                    break
+        elif fmt == "flac":
+            for f in sorted(formats, key=lambda x: x.get("abr") or 0, reverse=True):
+                if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                    audio_url = f.get("url")
+                    actual_ext = f.get("ext", "webm")
+                    break
+        else:
+            for f in formats:
+                if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                    audio_url = f.get("url")
+                    actual_ext = f.get("ext", "webm")
+                    break
+
+        if not audio_url:
+            audio_url = info.get("url")
+            actual_ext = info.get("ext", fmt)
+
+        if not audio_url:
+            raise HTTPException(status_code=500, detail="Audio URL çıkarılamadı")
+
+        logger.info(f"✅ Başarılı [{fmt}/{actual_ext}]: {title[:50]}")
         return {
             "status": "success",
-            "mp3_url": data["url"],
-            "title": data.get("filename", ""),
-            "duration": 0,
+            "mp3_url": audio_url,
+            "title": title,
+            "duration": duration,
+            "thumbnail": thumbnail,
+            "actual_format": actual_ext,
         }
-    error_msg = data.get("error", {}).get("message", "Cobalt işleme hatası")
-    logger.error(f"❌ Cobalt: {error_msg}")
-    raise HTTPException(status_code=500, detail=error_msg)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Audio hatası: {error_msg[:200]}")
+        raise HTTPException(status_code=500, detail=f"İşleme hatası: {error_msg[:200]}")
 
 
 class Mp3Request(BaseModel):
@@ -179,10 +238,4 @@ def get_audio_url(
 
     logger.info(f"Stream isteği [{fmt}]: {url}")
 
-    try:
-        return call_cobalt(url, fmt)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Stream hatası: {e}")
-        raise HTTPException(status_code=500, detail=f"İşleme hatası: {str(e)[:200]}")
+    return extract_audio(url, fmt)
