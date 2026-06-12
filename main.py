@@ -9,7 +9,7 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="MP3 Stream API", version="2.0.0")
+app = FastAPI(title="MP3 Stream API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,49 +18,141 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Render Environment Variable'dan alınır
-# Render Dashboard → Environment → API_SECRET_KEY = istediğin şifre
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
+
+SUPPORTED_FORMATS = ["mp3", "m4a", "flac"]
+
+# Format → yt-dlp format string
+FORMAT_MAP = {
+    "mp3":  "bestaudio[ext=webm]/bestaudio/best",
+    "m4a":  "bestaudio[ext=m4a]/bestaudio/best",
+    "flac": "bestaudio/best",
+}
 
 
 class Mp3Request(BaseModel):
     url: str
+    format: str = "mp3"   # mp3 | m4a | flac
+
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 20
 
 
 def check_api_key(x_api_key: Optional[str]):
-    """API key kontrolü - eğer .env'de set edildiyse kontrol eder"""
     if API_SECRET_KEY and x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Yetkisiz erişim")
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "MP3 Stream API v2.0 çalışıyor"}
+    return {
+        "status": "ok",
+        "message": "MP3 Stream API v4.0 çalışıyor",
+        "supported_formats": SUPPORTED_FORMATS,
+    }
+
+
+@app.post("/api/search")
+def search_music(
+    request: SearchRequest,
+    x_api_key: Optional[str] = Header(default=None)
+):
+    check_api_key(x_api_key)
+
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Arama terimi boş olamaz")
+
+    logger.info(f"Arama: {query}")
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "noplaylist": False,
+    }
+
+    try:
+        search_url = f"ytsearch{request.limit}:{query} music"
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+
+            if not info or "entries" not in info:
+                return {"status": "success", "results": []}
+
+            results = []
+            for entry in info["entries"]:
+                if not entry:
+                    continue
+
+                video_id = entry.get("id", "")
+                title = entry.get("title", "Bilinmeyen")
+                duration = entry.get("duration", 0)
+                channel = entry.get("channel", entry.get("uploader", ""))
+                thumbnail = entry.get("thumbnail", "")
+
+                if not thumbnail and video_id:
+                    thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+                if " - " in title:
+                    parts = title.split(" - ", 1)
+                    artist = parts[0].strip()
+                    song_title = parts[1].strip()
+                else:
+                    artist = channel
+                    song_title = title
+
+                results.append({
+                    "id": video_id,
+                    "title": song_title,
+                    "artist": artist,
+                    "uploader": channel,
+                    "duration": duration,
+                    "coverUrl": thumbnail,
+                    "audioUrl": f"https://www.youtube.com/watch?v={video_id}",
+                    "isCopyrightFree": False,
+                })
+
+            logger.info(f"Arama sonucu: {len(results)} şarkı")
+            return {"status": "success", "results": results}
+
+    except Exception as e:
+        logger.error(f"Arama hatası: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Arama hatası: {str(e)[:200]}")
 
 
 @app.post("/api/mp3")
-def get_mp3_url(
+def get_audio_url(
     request: Mp3Request,
     x_api_key: Optional[str] = Header(default=None)
 ):
     """
-    YouTube URL'sini alır, direkt stream edilebilir audio URL döndürür.
-    Android uygulaması bu URL'yi ExoPlayer ile çalar veya indirir.
+    YouTube URL + format alır, stream edilebilir audio URL döndürür.
+    format: mp3 | m4a | flac
     """
     check_api_key(x_api_key)
 
     url = request.url.strip()
+    fmt = request.format.lower().strip()
 
     if not url:
         raise HTTPException(status_code=400, detail="URL boş olamaz")
-
     if "youtube.com" not in url and "youtu.be" not in url:
         raise HTTPException(status_code=400, detail="Sadece YouTube URL'leri destekleniyor")
+    if fmt not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Desteklenmeyen format. Geçerli: {', '.join(SUPPORTED_FORMATS)}"
+        )
 
-    logger.info(f"İstek alındı: {url}")
+    logger.info(f"Stream isteği [{fmt}]: {url}")
 
     ydl_opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "format": FORMAT_MAP[fmt],
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -81,35 +173,54 @@ def get_mp3_url(
             duration = info.get("duration", 0)
             title = info.get("title", "Bilinmeyen")
             thumbnail = info.get("thumbnail", "")
+            actual_ext = info.get("ext", fmt)  # gerçek uzantı
 
+            # İstenen formata göre en iyi stream'i seç
             formats = info.get("formats", [])
 
-            for fmt in formats:
-                if fmt.get("acodec") != "none" and fmt.get("vcodec") == "none":
-                    if fmt.get("url"):
-                        audio_url = fmt["url"]
+            if fmt == "m4a":
+                for f in formats:
+                    if f.get("ext") == "m4a" and f.get("acodec") != "none" and f.get("vcodec") == "none":
+                        audio_url = f.get("url")
+                        actual_ext = "m4a"
+                        break
+            elif fmt == "flac":
+                # FLAC direkt stream genelde yoktur; en yüksek kaliteli audio alınır
+                for f in sorted(formats, key=lambda x: x.get("abr") or 0, reverse=True):
+                    if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                        audio_url = f.get("url")
+                        actual_ext = f.get("ext", "webm")
+                        break
+            else:  # mp3
+                for f in formats:
+                    if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                        audio_url = f.get("url")
+                        actual_ext = f.get("ext", "webm")
                         break
 
+            # Fallback
             if not audio_url:
                 audio_url = info.get("url")
+                actual_ext = info.get("ext", fmt)
 
             if not audio_url:
                 raise HTTPException(status_code=500, detail="Stream URL çıkarılamadı")
 
-            logger.info(f"Başarılı: {title}")
+            logger.info(f"Başarılı [{fmt}/{actual_ext}]: {title}")
 
             return {
                 "status": "success",
                 "title": title,
                 "duration": duration,
                 "thumbnail": thumbnail,
-                "mp3_url": audio_url,
+                "requested_format": fmt,
+                "actual_format": actual_ext,
+                "mp3_url": audio_url,   # alan adı aynı kaldı (geriye dönük uyumluluk)
             }
 
     except yt_dlp.utils.DownloadError as e:
         error_msg = str(e)
         logger.error(f"yt-dlp hatası: {error_msg}")
-
         if "Private video" in error_msg:
             raise HTTPException(status_code=403, detail="Bu video özel")
         elif "not available" in error_msg:
