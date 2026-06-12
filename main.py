@@ -126,8 +126,10 @@ def search_music(
                 logger.warning("⚠️ yt-dlp boş yanıt döndü")
                 return {"status": "success", "results": []}
 
-            entries = info.get("entries") or info.get("items")
-            if not entries:
+            entries = info.get("entries")
+            if entries is None:
+                entries = info.get("items")
+            if entries is None:
                 logger.warning(f"⚠️ yt-dlp yanıtında entry bulunamadı: {list(info.keys())}")
                 return {"status": "success", "results": []}
 
