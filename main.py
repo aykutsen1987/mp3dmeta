@@ -23,6 +23,7 @@ app.add_middleware(
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
 SUPPORTED_FORMATS = ["mp3", "m4a", "flac"]
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
 YDL_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.5345.16 Mobile Safari/537.36",
@@ -34,47 +35,80 @@ YDL_HEADERS = {
 
 
 def search_youtube(query: str, limit: int = 20) -> list:
-    logger.info(f"🔍 iTunes Search: {query}")
-    url = f"https://itunes.apple.com/search?term={quote(query)}&limit={limit}&entity=musicVideo"
-    resp = requests.get(url, timeout=15)
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(status_code=500, detail="YOUTUBE_API_KEY .env'de tanımlı değil")
+
+    logger.info(f"🔍 YouTube Search: {query}")
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "videoCategoryId": "10",
+        "maxResults": limit,
+        "key": YOUTUBE_API_KEY,
+    }
+    resp = requests.get(url, params=params, timeout=15)
     if resp.status_code != 200:
-        logger.error(f"❌ iTunes hatası {resp.status_code}: {resp.text[:200]}")
+        logger.error(f"❌ YouTube API hatası {resp.status_code}: {resp.text[:300]}")
         return []
 
     data = resp.json()
-    items = data.get("results", [])
-    logger.info(f"✅ iTunes: {len(items)} sonuç")
+    items = data.get("items", [])
+    logger.info(f"✅ YouTube: {len(items)} sonuç")
+
+    video_ids = [item["id"]["videoId"] for item in items if item.get("id", {}).get("videoId")]
+    if not video_ids:
+        return []
+
+    stats_url = "https://www.googleapis.com/youtube/v3/videos"
+    stats_params = {
+        "part": "contentDetails,snippet",
+        "id": ",".join(video_ids),
+        "key": YOUTUBE_API_KEY,
+    }
+    stats_resp = requests.get(stats_url, params=stats_params, timeout=15)
+    duration_map = {}
+    thumbnails_map = {}
+    if stats_resp.status_code == 200:
+        for video in stats_resp.json().get("items", []):
+            vid = video["id"]
+            raw = video.get("contentDetails", {}).get("duration", "PT0S")
+            seconds = 0
+            import re
+            m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", raw)
+            if m:
+                h, mn, s = [int(x) if x else 0 for x in m.groups()]
+                seconds = h * 3600 + mn * 60 + s
+            duration_map[vid] = seconds
+            thumbs = video.get("snippet", {}).get("thumbnails", {})
+            best = thumbs.get("maxres") or thumbs.get("high") or thumbs.get("medium") or thumbs.get("default") or {}
+            thumbnails_map[vid] = best.get("url", "")
 
     results = []
     for item in items:
-        track_name = item.get("trackName", item.get("trackCensoredName", "Bilinmeyen"))
-        artist_name = item.get("artistName", "")
-
-        if " - " in track_name:
-            parts = track_name.split(" - ", 1)
-            artist = parts[0].strip()
-            song_title = parts[1].strip()
-        else:
-            artist = artist_name
-            song_title = track_name
-
-        artwork = (
-            item.get("artworkUrl100", "")
-            .replace("100x100bb", "600x600bb")
-            .replace("100x100", "600x600")
+        vid = item.get("id", {}).get("videoId", "")
+        snippet = item.get("snippet", {})
+        title = snippet.get("title", "Bilinmeyen")
+        channel = snippet.get("channelTitle", "")
+        thumb = snippet.get("thumbnails", {})
+        cover = (
+            thumb.get("high", {}).get("url", "")
+            or thumb.get("medium", {}).get("url", "")
+            or thumb.get("default", {}).get("url", "")
         )
-
-        track_url = item.get("trackViewUrl", "")
+        if vid in thumbnails_map and not cover:
+            cover = thumbnails_map[vid]
 
         results.append({
-            "id": f"it_{item.get('trackId', 0)}",
-            "title": song_title,
-            "artist": artist,
-            "uploader": artist_name,
-            "duration": item.get("trackTimeMillis", 0) // 1000,
-            "coverUrl": artwork,
-            "audioUrl": track_url if track_url else f"https://music.apple.com/search?term={quote(track_name + ' ' + artist_name)}",
-            "isCopyrightFree": True,
+            "id": vid,
+            "title": title,
+            "artist": "",
+            "uploader": channel,
+            "duration": duration_map.get(vid, 0),
+            "coverUrl": cover,
+            "audioUrl": f"https://www.youtube.com/watch?v={vid}",
+            "isCopyrightFree": False,
         })
 
     return results
