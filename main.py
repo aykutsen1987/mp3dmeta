@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import yt_dlp
 import logging
 import os
+import tempfile
 from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
@@ -20,14 +21,67 @@ app.add_middleware(
 
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
+@app.on_event("shutdown")
+def cleanup():
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        try:
+            os.unlink(COOKIES_FILE)
+            logger.info("🧹 Cookies temp dosyası temizlendi")
+        except Exception:
+            pass
+
 SUPPORTED_FORMATS = ["mp3", "m4a", "flac"]
 
-# Format → yt-dlp format string
 FORMAT_MAP = {
     "mp3":  "bestaudio[ext=webm]/bestaudio/best",
     "m4a":  "bestaudio[ext=m4a]/bestaudio/best",
     "flac": "bestaudio/best",
 }
+
+COOKIES_FILE = None
+cookies_env = os.environ.get("YOUTUBE_COOKIES", "")
+if cookies_env:
+    try:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        tmp.write(cookies_env)
+        tmp.close()
+        COOKIES_FILE = tmp.name
+        logger.info("✅ YouTube cookies yüklendi")
+    except Exception as e:
+        logger.error(f"❌ Cookies yüklenemedi: {e}")
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+}
+
+def get_ydl_opts(base_opts: dict) -> dict:
+    opts = {
+        **base_opts,
+        "http_headers": BROWSER_HEADERS,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["dash", "hls", "translated_subs"],
+            }
+        },
+        "youtube_include_dash_manifest": False,
+        "youtube_include_hls_manifest": False,
+    }
+    if COOKIES_FILE:
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
 
 
 class Mp3Request(BaseModel):
@@ -67,13 +121,13 @@ def search_music(
 
     logger.info(f"Arama: {query}")
 
-    ydl_opts = {
+    ydl_opts = get_ydl_opts({
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
         "skip_download": True,
         "noplaylist": False,
-    }
+    })
 
     try:
         search_url = f"ytsearch{request.limit}:{query} music"
@@ -151,16 +205,13 @@ def get_audio_url(
 
     logger.info(f"Stream isteği [{fmt}]: {url}")
 
-    ydl_opts = {
+    ydl_opts = get_ydl_opts({
         "format": FORMAT_MAP[fmt],
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
-        },
-    }
+    })
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
