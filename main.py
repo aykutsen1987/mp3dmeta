@@ -171,8 +171,6 @@ def get_audio_url(
 
     if not url:
         raise HTTPException(status_code=400, detail="URL boş olamaz")
-    if "youtube.com" not in url and "youtu.be" not in url:
-        raise HTTPException(status_code=400, detail="Sadece YouTube URL'leri destekleniyor")
     if fmt not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
