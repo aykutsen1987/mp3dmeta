@@ -99,26 +99,21 @@ def search_music(
 
     logger.info(f"Arama: {query}")
 
+    search_url = f"ytsearch{request.limit}:{query} music"
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "extract_flat": True,
+        "extract_flat": False,
         "skip_download": True,
         "noplaylist": False,
+        "playlistend": request.limit,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-            }
-        },
-        "youtube_include_dash_manifest": False,
     }
 
     try:
-        search_url = f"ytsearch{request.limit}:{query} music"
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_url, download=False)
 
@@ -134,16 +129,26 @@ def search_music(
                 return {"status": "success", "results": []}
 
             logger.info(f"✅ yt-dlp {len(entries)} sonuç döndü")
+
             results = []
             for entry in entries:
                 if not entry:
                     continue
 
                 video_id = entry.get("id", "")
+                if not video_id and "url" in entry:
+                    import re
+                    m = re.search(r"[&?]v=([a-zA-Z0-9_-]{11})", entry["url"])
+                    if m:
+                        video_id = m.group(1)
+                if not video_id:
+                    continue
+
                 title = entry.get("title", "Bilinmeyen")
                 duration = entry.get("duration", 0)
-                channel = entry.get("channel", entry.get("uploader", ""))
+                channel = entry.get("channel", entry.get("uploader", entry.get("creator", "")))
                 thumbnail = entry.get("thumbnail", "")
+                webpage_url = entry.get("webpage_url", entry.get("url", ""))
 
                 if not thumbnail and video_id:
                     thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
@@ -161,7 +166,7 @@ def search_music(
                     "title": song_title,
                     "artist": artist,
                     "uploader": channel,
-                    "duration": duration,
+                    "duration": duration if isinstance(duration, (int, float)) else 0,
                     "coverUrl": thumbnail,
                     "audioUrl": f"https://www.youtube.com/watch?v={video_id}",
                     "isCopyrightFree": False,
