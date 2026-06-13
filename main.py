@@ -149,15 +149,15 @@ def _build_result(info: dict, fmt: str, audio_url: str, actual_ext: str) -> dict
 
 def _try_ytdlp(url: str, fmt: str, cookies_file: str = "") -> dict | None:
     FORMAT_MAP = {
-        "mp3": "bestaudio[ext=webm]/bestaudio/best",
-        "m4a": "bestaudio[ext=m4a]/bestaudio/best",
-        "flac": "bestaudio/best",
+        "mp3": "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+        "m4a": "140/bestaudio[ext=m4a]/bestaudio/best",
+        "flac": "140/bestaudio/best",
     }
     ydl_opts = {
         "format": FORMAT_MAP[fmt],
         "quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
         "http_headers": YDL_HEADERS,
-        "extractor_args": {"youtube": {"player_client": ["android"], "skip": ["dash", "hls", "translated_subs"]}},
+        "extractor_args": {"youtube": {"player_client": ["web"], "skip": ["dash", "hls", "translated_subs"]}},
         "youtube_include_dash_manifest": False, "youtube_include_hls_manifest": False,
         "socket_timeout": 30, "retries": 3, "fragment_retries": 3,
     }
