@@ -202,8 +202,12 @@ def _try_ytdlp(url: str, fmt: str, cookies_file: str = "") -> dict | None:
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        logger.warning(f"⚠️ yt-dlp başarısız: {str(e)[:100]}")
+        return None
 
     if not info:
         return None
