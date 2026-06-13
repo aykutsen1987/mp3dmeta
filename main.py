@@ -34,97 +34,152 @@ YDL_HEADERS = {
 }
 
 
-def search_youtube(query: str, limit: int = 20) -> list:
+def _search_youtube(query: str, limit: int = 20) -> list:
     if not YOUTUBE_API_KEY:
-        raise HTTPException(status_code=500, detail="YOUTUBE_API_KEY .env'de tanımlı değil")
+        return []
 
     logger.info(f"🔍 YouTube Search: {query}")
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "part": "snippet",
-        "q": query,
-        "type": "video",
-        "videoCategoryId": "10",
-        "maxResults": limit,
-        "key": YOUTUBE_API_KEY,
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    if resp.status_code != 200:
-        logger.error(f"❌ YouTube API hatası {resp.status_code}: {resp.text[:300]}")
+    try:
+        url = "https://www.googleapis.com/youtube/v3/search"
+        params = {
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "videoCategoryId": "10",
+            "maxResults": limit,
+            "key": YOUTUBE_API_KEY,
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            logger.error(f"❌ YouTube API hatası {resp.status_code}")
+            return []
+
+        items = resp.json().get("items", [])
+        video_ids = [item["id"]["videoId"] for item in items if item.get("id", {}).get("videoId")]
+        if not video_ids:
+            return []
+
+        duration_map = {}
+        thumbnails_map = {}
+        import re
+        stats_url = "https://www.googleapis.com/youtube/v3/videos"
+        stats_resp = requests.get(stats_url, params={
+            "part": "contentDetails,snippet",
+            "id": ",".join(video_ids),
+            "key": YOUTUBE_API_KEY,
+        }, timeout=15)
+        if stats_resp.status_code == 200:
+            for video in stats_resp.json().get("items", []):
+                vid = video["id"]
+                raw = video.get("contentDetails", {}).get("duration", "PT0S")
+                seconds = 0
+                m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", raw)
+                if m:
+                    h, mn, s = [int(x) if x else 0 for x in m.groups()]
+                    seconds = h * 3600 + mn * 60 + s
+                duration_map[vid] = seconds
+                thumbs = video.get("snippet", {}).get("thumbnails", {})
+                best = thumbs.get("maxres") or thumbs.get("high") or thumbs.get("medium") or thumbs.get("default") or {}
+                thumbnails_map[vid] = best.get("url", "")
+
+        results = []
+        for item in items:
+            vid = item.get("id", {}).get("videoId", "")
+            snippet = item.get("snippet", {})
+            title = snippet.get("title", "Bilinmeyen")
+            channel = snippet.get("channelTitle", "")
+            thumb = snippet.get("thumbnails", {})
+            cover = (
+                thumb.get("high", {}).get("url", "")
+                or thumb.get("medium", {}).get("url", "")
+                or thumb.get("default", {}).get("url", "")
+            )
+            if vid in thumbnails_map and not cover:
+                cover = thumbnails_map[vid]
+
+            results.append({
+                "id": vid,
+                "title": title,
+                "artist": "",
+                "uploader": channel,
+                "duration": duration_map.get(vid, 0),
+                "coverUrl": cover,
+                "audioUrl": f"https://www.youtube.com/watch?v={vid}",
+                "source": "youtube",
+                "previewUrl": "",
+            })
+
+        logger.info(f"✅ YouTube: {len(results)} sonuç")
+        return results
+    except Exception as e:
+        logger.error(f"❌ YouTube arama hatası: {str(e)[:100]}")
         return []
 
-    data = resp.json()
-    items = data.get("items", [])
-    logger.info(f"✅ YouTube: {len(items)} sonuç")
 
-    video_ids = [item["id"]["videoId"] for item in items if item.get("id", {}).get("videoId")]
-    if not video_ids:
+def _search_itunes(query: str, limit: int = 20) -> list:
+    logger.info(f"🔍 iTunes Search: {query}")
+    try:
+        url = f"https://itunes.apple.com/search?term={quote(query)}&limit={limit}&entity=musicVideo"
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            logger.error(f"❌ iTunes hatası {resp.status_code}")
+            return []
+
+        items = resp.json().get("results", [])
+        results = []
+        for item in items:
+            track_name = item.get("trackName", item.get("trackCensoredName", "Bilinmeyen"))
+            artist_name = item.get("artistName", "")
+
+            title = track_name
+            artist = artist_name
+            if " - " in track_name:
+                parts = track_name.split(" - ", 1)
+                artist = parts[0].strip()
+                title = parts[1].strip()
+
+            artwork = (
+                item.get("artworkUrl100", "")
+                .replace("100x100bb", "600x600bb")
+                .replace("100x100", "600x600")
+            )
+
+            results.append({
+                "id": f"it_{item.get('trackId', 0)}",
+                "title": title,
+                "artist": artist,
+                "uploader": artist_name,
+                "duration": item.get("trackTimeMillis", 0) // 1000,
+                "coverUrl": artwork,
+                "audioUrl": item.get("trackViewUrl", ""),
+                "source": "itunes",
+                "previewUrl": item.get("previewUrl", ""),
+            })
+
+        logger.info(f"✅ iTunes: {len(results)} sonuç")
+        return results
+    except Exception as e:
+        logger.error(f"❌ iTunes arama hatası: {str(e)[:100]}")
         return []
 
-    stats_url = "https://www.googleapis.com/youtube/v3/videos"
-    stats_params = {
-        "part": "contentDetails,snippet",
-        "id": ",".join(video_ids),
-        "key": YOUTUBE_API_KEY,
+
+def _build_result(info: dict, fmt: str, audio_url: str, actual_ext: str) -> dict:
+    return {
+        "status": "success",
+        "mp3_url": audio_url,
+        "title": info.get("title", "Bilinmeyen"),
+        "duration": info.get("duration", 0),
+        "thumbnail": info.get("thumbnail", ""),
+        "actual_format": actual_ext,
     }
-    stats_resp = requests.get(stats_url, params=stats_params, timeout=15)
-    duration_map = {}
-    thumbnails_map = {}
-    if stats_resp.status_code == 200:
-        for video in stats_resp.json().get("items", []):
-            vid = video["id"]
-            raw = video.get("contentDetails", {}).get("duration", "PT0S")
-            seconds = 0
-            import re
-            m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", raw)
-            if m:
-                h, mn, s = [int(x) if x else 0 for x in m.groups()]
-                seconds = h * 3600 + mn * 60 + s
-            duration_map[vid] = seconds
-            thumbs = video.get("snippet", {}).get("thumbnails", {})
-            best = thumbs.get("maxres") or thumbs.get("high") or thumbs.get("medium") or thumbs.get("default") or {}
-            thumbnails_map[vid] = best.get("url", "")
-
-    results = []
-    for item in items:
-        vid = item.get("id", {}).get("videoId", "")
-        snippet = item.get("snippet", {})
-        title = snippet.get("title", "Bilinmeyen")
-        channel = snippet.get("channelTitle", "")
-        thumb = snippet.get("thumbnails", {})
-        cover = (
-            thumb.get("high", {}).get("url", "")
-            or thumb.get("medium", {}).get("url", "")
-            or thumb.get("default", {}).get("url", "")
-        )
-        if vid in thumbnails_map and not cover:
-            cover = thumbnails_map[vid]
-
-        results.append({
-            "id": vid,
-            "title": title,
-            "artist": "",
-            "uploader": channel,
-            "duration": duration_map.get(vid, 0),
-            "coverUrl": cover,
-            "audioUrl": f"https://www.youtube.com/watch?v={vid}",
-            "isCopyrightFree": False,
-        })
-
-    return results
 
 
-def extract_audio(url: str, audio_format: str) -> dict:
-    fmt = audio_format.lower().strip()
-    if fmt not in SUPPORTED_FORMATS:
-        fmt = "mp3"
-
+def _try_ytdlp(url: str, fmt: str, cookies_file: str = "") -> dict | None:
     FORMAT_MAP = {
         "mp3": "bestaudio[ext=webm]/bestaudio/best",
         "m4a": "bestaudio[ext=m4a]/bestaudio/best",
         "flac": "bestaudio/best",
     }
-
     ydl_opts = {
         "format": FORMAT_MAP[fmt],
         "quiet": True,
@@ -144,64 +199,105 @@ def extract_audio(url: str, audio_format: str) -> dict:
         "retries": 3,
         "fragment_retries": 3,
     }
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
 
-    try:
-        logger.info(f"🎵 Audio çıkarılıyor: {url} [{fmt}]")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
-        if not info:
-            raise HTTPException(status_code=404, detail="Video bulunamadı")
+    if not info:
+        return None
 
-        audio_url = None
-        duration = info.get("duration", 0)
-        title = info.get("title", "Bilinmeyen")
-        thumbnail = info.get("thumbnail", "")
+    audio_url = None
+    actual_ext = info.get("ext", fmt)
+    formats = info.get("formats", [])
+
+    if fmt == "m4a":
+        for f in formats:
+            if f.get("ext") == "m4a" and f.get("acodec") != "none" and f.get("vcodec") == "none":
+                audio_url = f.get("url")
+                actual_ext = "m4a"
+                break
+    elif fmt == "flac":
+        for f in sorted(formats, key=lambda x: x.get("abr") or 0, reverse=True):
+            if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                audio_url = f.get("url")
+                actual_ext = f.get("ext", "webm")
+                break
+    else:
+        for f in formats:
+            if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                audio_url = f.get("url")
+                actual_ext = f.get("ext", "webm")
+                break
+
+    if not audio_url:
+        audio_url = info.get("url")
         actual_ext = info.get("ext", fmt)
-        formats = info.get("formats", [])
 
-        if fmt == "m4a":
-            for f in formats:
-                if f.get("ext") == "m4a" and f.get("acodec") != "none" and f.get("vcodec") == "none":
-                    audio_url = f.get("url")
-                    actual_ext = "m4a"
-                    break
-        elif fmt == "flac":
-            for f in sorted(formats, key=lambda x: x.get("abr") or 0, reverse=True):
-                if f.get("acodec") != "none" and f.get("vcodec") == "none":
-                    audio_url = f.get("url")
-                    actual_ext = f.get("ext", "webm")
-                    break
-        else:
-            for f in formats:
-                if f.get("acodec") != "none" and f.get("vcodec") == "none":
-                    audio_url = f.get("url")
-                    actual_ext = f.get("ext", "webm")
-                    break
+    if not audio_url:
+        return None
 
-        if not audio_url:
-            audio_url = info.get("url")
-            actual_ext = info.get("ext", fmt)
+    return _build_result(info, fmt, audio_url, actual_ext)
 
-        if not audio_url:
-            raise HTTPException(status_code=500, detail="Audio URL çıkarılamadı")
 
-        logger.info(f"✅ Başarılı [{fmt}/{actual_ext}]: {title[:50]}")
-        return {
-            "status": "success",
-            "mp3_url": audio_url,
-            "title": title,
-            "duration": duration,
-            "thumbnail": thumbnail,
-            "actual_format": actual_ext,
+def _try_pytubefix(url: str) -> dict | None:
+    try:
+        from pytubefix import YouTube
+        yt = YouTube(url)
+        if not yt or not yt.streams:
+            return None
+        audio = yt.streams.get_audio_only()
+        if not audio:
+            audio = yt.streams.filter(only_audio=True).first()
+        if not audio or not audio.url:
+            return None
+        info = {
+            "title": yt.title or "Bilinmeyen",
+            "duration": yt.length or 0,
+            "thumbnail": yt.thumbnail_url or "",
         }
-
-    except HTTPException:
-        raise
+        return _build_result(info, "mp3", audio.url, "mp4")
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Audio hatası: {error_msg[:200]}")
-        raise HTTPException(status_code=500, detail=f"İşleme hatası: {error_msg[:200]}")
+        logger.warning(f"⚠️ pytubefix başarısız: {str(e)[:100]}")
+        return None
+
+
+COOKIES_PATH = os.environ.get("COOKIES_PATH", "/etc/secrets/cookies.txt")
+
+
+def extract_audio(url: str, audio_format: str) -> dict:
+    fmt = audio_format.lower().strip()
+    if fmt not in SUPPORTED_FORMATS:
+        fmt = "mp3"
+
+    # 1. Deneme: yt-dlp + android player client
+    logger.info(f"🎵 [1/3] yt-dlp android ile deneniyor: {url} [{fmt}]")
+    result = _try_ytdlp(url, fmt)
+    if result:
+        return result
+
+    # 2. Deneme: pytubefix
+    logger.info(f"🎵 [2/3] pytubefix deneniyor: {url} [{fmt}]")
+    result = _try_pytubefix(url)
+    if result:
+        return result
+
+    # 3. Deneme: yt-dlp + cookies
+    cookies_file = COOKIES_PATH if os.path.exists(COOKIES_PATH) else ""
+    if cookies_file:
+        logger.info(f"🎵 [3/3] yt-dlp cookies ile deneniyor: {url} [{fmt}]")
+        result = _try_ytdlp(url, fmt, cookies_file)
+        if result:
+            return result
+
+    raise HTTPException(
+        status_code=500,
+        detail="YouTube bot engelini aşamadık. 3 yöntem denendi: "
+        "(1) yt-dlp android client, (2) pytubefix, (3) yt-dlp cookies. "
+        "Çözüm: Render Dashboard → Environment → COOKIES_PATH ayarla veya "
+        "YouTube API key ile stream yöntemine geç."
+    )
 
 
 class Mp3Request(BaseModel):
@@ -240,9 +336,23 @@ def search_music(
         raise HTTPException(status_code=400, detail="Arama terimi boş olamaz")
 
     try:
-        results = search_youtube(query, request.limit)
-        logger.info(f"Arama sonucu: {len(results)} şarkı")
-        return {"status": "success", "results": results}
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            yt_future = pool.submit(_search_youtube, query, request.limit)
+            it_future = pool.submit(_search_itunes, query, request.limit)
+            yt_results = yt_future.result()
+            it_results = it_future.result()
+
+        seen = set()
+        merged = []
+        for r in yt_results + it_results:
+            key = r["title"].lower() + r.get("artist", "").lower()
+            if key not in seen:
+                seen.add(key)
+                merged.append(r)
+
+        logger.info(f"Arama sonucu: YouTube {len(yt_results)} + iTunes {len(it_results)} = {len(merged)} benzersiz")
+        return {"status": "success", "results": merged}
     except Exception as e:
         logger.error(f"Arama hatası: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Arama hatası: {str(e)[:200]}")
